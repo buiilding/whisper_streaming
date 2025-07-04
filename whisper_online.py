@@ -31,8 +31,9 @@ class ASRBase:
     sep = " "   # join transcribe words with this character (" " for whisper_timestamped,
                 # "" for faster-whisper because it emits the spaces when neeeded)
 
-    def __init__(self, lan, modelsize=None, cache_dir=None, model_dir=None, logfile=sys.stderr):
+    def __init__(self, lan, modelsize=None, cache_dir=None, model_dir=None, logfile=sys.stderr, no_speech_threshold=0.6):
         self.logfile = logfile
+        self.no_speech_threshold = no_speech_threshold
 
         self.transcribe_kargs = {}
         if lan == "auto":
@@ -43,14 +44,14 @@ class ASRBase:
         self.model = self.load_model(modelsize, cache_dir, model_dir)
 
 
-    def load_model(self, modelsize, cache_dir):
-        raise NotImplemented("must be implemented in the child class")
+    def load_model(self, modelsize, cache_dir, model_dir):
+        raise NotImplementedError("must be implemented in the child class")
 
     def transcribe(self, audio, init_prompt=""):
-        raise NotImplemented("must be implemented in the child class")
+        raise NotImplementedError("must be implemented in the child class")
 
     def use_vad(self):
-        raise NotImplemented("must be implemented in the child class")
+        raise NotImplementedError("must be implemented in the child class")
 
 
 class WhisperTimestampedASR(ASRBase):
@@ -67,12 +68,16 @@ class WhisperTimestampedASR(ASRBase):
         self.transcribe_timestamped = transcribe_timestamped
         if model_dir is not None:
             logger.debug("ignoring model_dir, not implemented")
-        return whisper.load_model(modelsize, download_root=cache_dir)
+        
+        if not modelsize:
+            raise ValueError("A model size must be provided for the whisper_timestamped backend.")
+
+        return whisper.load_model(modelsize, download_root=cache_dir or "")
 
     def transcribe(self, audio, init_prompt=""):
         result = self.transcribe_timestamped(self.model,
                 audio, language=self.original_language,
-                initial_prompt=init_prompt, verbose=None,
+                initial_prompt=init_prompt, verbose=False,
                 condition_on_previous_text=True, **self.transcribe_kargs)
         return result
  
@@ -139,7 +144,7 @@ class FasterWhisperASR(ASRBase):
         o = []
         for segment in segments:
             for word in segment.words:
-                if segment.no_speech_prob > 0.9:
+                if segment.no_speech_prob > self.no_speech_threshold:
                     continue
                 # not stripping the spaces -- should not be merged with them!
                 w = word.word
@@ -178,8 +183,12 @@ class MLXWhisper(ASRBase):
                 model_dir (str, optional): Direct path to a custom model directory. 
                     If specified, it overrides the `modelsize` parameter.
         """
-        from mlx_whisper.transcribe import ModelHolder, transcribe
-        import mlx.core as mx # Is installed with mlx-whisper
+        # if this is a macbook
+        if sys.platform == "darwin":
+            from mlx_whisper.transcribe import ModelHolder, transcribe
+            import mlx.core as mx # Is installed with mlx-whisper
+        else:
+            raise ValueError("MLX Whisper is only supported on macOS.")
         
         if model_dir is not None:
             logger.debug(f"Loading whisper model from model_dir {model_dir}. modelsize parameter is not used.")
@@ -256,7 +265,7 @@ class MLXWhisper(ASRBase):
             (word["start"], word["end"], word["word"])
             for segment in segments
             for word in segment.get("words", [])
-            if segment.get("no_speech_prob", 0) <= 0.9
+            if segment.get("no_speech_prob", 0) <= self.no_speech_threshold
         ]
     
     def segments_end_ts(self, res):
@@ -271,8 +280,9 @@ class MLXWhisper(ASRBase):
 class OpenaiApiASR(ASRBase):
     """Uses OpenAI's Whisper API for audio transcription."""
 
-    def __init__(self, lan=None, temperature=0, logfile=sys.stderr):
+    def __init__(self, lan=None, temperature=0, logfile=sys.stderr, no_speech_threshold=0.6):
         self.logfile = logfile
+        self.no_speech_threshold = no_speech_threshold
 
         self.modelname = "whisper-1"  
         self.original_language = None if lan == "auto" else lan # ISO-639-1 language code
@@ -298,7 +308,7 @@ class OpenaiApiASR(ASRBase):
         if self.use_vad_opt:
             for segment in segments.segments:
                 # TODO: threshold can be set from outside
-                if segment["no_speech_prob"] > 0.8:
+                if segment["no_speech_prob"] > self.no_speech_threshold:
                     no_speech_segments.append((segment.get("start"), segment.get("end")))
 
         o = []
@@ -578,6 +588,7 @@ class OnlineASRProcessor:
         """Uses self.tokenizer for sentence segmentation of words.
         Returns: [(beg,end,"sentence 1"),...]
         """
+        assert self.tokenizer, "tokenizer must be set to use sentence segmentation."
         
         cwords = [w for w in words]
         t = " ".join(o[2] for o in cwords)
@@ -634,19 +645,25 @@ class VACOnlineASRProcessor(OnlineASRProcessor):
     When it detects end of speech (non-voice for 500ms), it makes OnlineASRProcessor to end the utterance immediately.
     '''
 
-    def __init__(self, online_chunk_size, *a, **kw):
+    def __init__(self, online_chunk_size, *a, 
+                 threshold=0.5,
+                 min_silence_duration_ms=500,
+                 **kw):
         self.online_chunk_size = online_chunk_size
 
         self.online = OnlineASRProcessor(*a, **kw)
 
         # VAC:
         import torch
-        model, _ = torch.hub.load(
+        model = torch.hub.load(
             repo_or_dir='snakers4/silero-vad',
             model='silero_vad'
         )
         from silero_vad_iterator import FixedVADIterator
-        self.vac = FixedVADIterator(model)  # we use the default options there: 500ms silence, 100ms padding, etc.  
+        self.vac = FixedVADIterator(model,
+            threshold=threshold,
+            min_silence_duration_ms=min_silence_duration_ms,
+        )
 
         self.logfile = self.online.logfile
         self.init()
@@ -757,7 +774,7 @@ def create_tokenizer(lan):
     wtp = WtP("wtp-canine-s-12l-no-adapters")
     class WtPtok:
         def split(self, sent):
-            return wtp.split(sent, lang_code=lan)
+            return wtp.split(sent, lang_code=lan or "")
     return WtPtok()
 
 
@@ -773,8 +790,13 @@ def add_shared_args(parser):
     parser.add_argument('--task', type=str, default='transcribe', choices=["transcribe","translate"],help="Transcribe or translate.")
     parser.add_argument('--backend', type=str, default="faster-whisper", choices=["faster-whisper", "whisper_timestamped", "mlx-whisper", "openai-api"],help='Load only this backend for Whisper processing.')
     parser.add_argument('--vac', action="store_true", default=False, help='Use VAC = voice activity controller. Recommended. Requires torch.')
+    parser.add_argument('--vad-threshold', type=float, default=0.3, help='Speech confidence threshold for VAC. Lower values are more sensitive.')
+    parser.add_argument('--vad-min-speech-duration-ms', type=int, default=150, help='Minimum duration for a speech segment to be detected by VAC in ms.')
+    parser.add_argument('--vad-min-silence-duration-ms', type=int, default=300, help='In VAC, silence duration in ms to trigger end of utterance.')
     parser.add_argument('--vac-chunk-size', type=float, default=0.04, help='VAC sample size in seconds.')
     parser.add_argument('--vad', action="store_true", default=False, help='Use VAD = voice activity detection, with the default parameters.')
+    parser.add_argument('--no-speech-threshold', type=float, default=0.6, help='Probability threshold for considering a segment as "no speech".')
+    parser.add_argument('--log-prob-threshold', type=float, default=-1.0, help='Log probability threshold for transcription. Lower values are more aggressive.')
     parser.add_argument('--buffer_trimming', type=str, default="segment", choices=["sentence", "segment"],help='Buffer trimming strategy -- trim completed sentences marked with punctuation mark and detected by sentence segmenter, or the completed segments returned by Whisper. Sentence segmenter must be installed for "sentence" option.')
     parser.add_argument('--buffer_trimming_sec', type=float, default=15, help='Buffer trimming length threshold in seconds. If buffer length is longer, trimming sentence/segment is triggered.')
     parser.add_argument("-l", "--log-level", dest="log_level", choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'], help="Set the log level", default='DEBUG')
@@ -786,7 +808,7 @@ def asr_factory(args, logfile=sys.stderr):
     backend = args.backend
     if backend == "openai-api":
         logger.debug("Using OpenAI API.")
-        asr = OpenaiApiASR(lan=args.lan)
+        asr = OpenaiApiASR(lan=args.lan, no_speech_threshold=args.no_speech_threshold)
     else:
         if backend == "faster-whisper":
             asr_cls = FasterWhisperASR
@@ -799,9 +821,12 @@ def asr_factory(args, logfile=sys.stderr):
         size = args.model
         t = time.time()
         logger.info(f"Loading Whisper {size} model for {args.lan}...")
-        asr = asr_cls(modelsize=size, lan=args.lan, cache_dir=args.model_cache_dir, model_dir=args.model_dir)
+        asr = asr_cls(modelsize=size, lan=args.lan, cache_dir=args.model_cache_dir, model_dir=args.model_dir, no_speech_threshold=args.no_speech_threshold)
         e = time.time()
         logger.info(f"done. It took {round(e-t,2)} seconds.")
+
+    if backend == "faster-whisper":
+        asr.transcribe_kargs["log_prob_threshold"] = args.log_prob_threshold
 
     # Apply common configurations
     if getattr(args, 'vad', False):  # Checks if VAD argument is present and True
@@ -824,7 +849,15 @@ def asr_factory(args, logfile=sys.stderr):
     # Create the OnlineASRProcessor
     if args.vac:
         
-        online = VACOnlineASRProcessor(args.min_chunk_size, asr,tokenizer,logfile=logfile,buffer_trimming=(args.buffer_trimming, args.buffer_trimming_sec))
+        online = VACOnlineASRProcessor(
+            args.min_chunk_size,
+            asr,
+            tokenizer,
+            logfile=logfile,
+            buffer_trimming=(args.buffer_trimming, args.buffer_trimming_sec),
+            threshold=args.vad_threshold,
+            min_silence_duration_ms=args.vad_min_silence_duration_ms,
+        )
     else:
         online = OnlineASRProcessor(asr,tokenizer,logfile=logfile,buffer_trimming=(args.buffer_trimming, args.buffer_trimming_sec))
 

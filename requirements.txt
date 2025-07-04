@@ -1,0 +1,25 @@
+# Core dependencies for whisper streaming
+numpy
+librosa
+soundfile
+torch
+
+# Whisper backends
+faster-whisper
+whisper-timestamped
+mlx-whisper; sys_platform == "darwin"
+openai
+
+# Voice Activity Detection
+# silero-vad is loaded via torch.hub.load - no separate pip install needed
+
+# Sentence tokenization
+mosestokenizer
+wtpsplit
+tokenize-uk
+
+# Audio input simulation
+pynput
+
+# Note: The following are built-in Python modules and don't need pip installation:
+# sys, io, math, time, logging, argparse, os, socket, random, functools
