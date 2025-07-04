@@ -120,7 +120,7 @@ class FasterWhisperASR(ASRBase):
 
         # or run on GPU with INT8
         # tested: the transcripts were different, probably worse than with FP16, and it was slightly (appx 20%) slower
-        #model = WhisperModel(model_size, device="cuda", compute_type="int8_float16")
+        # model = WhisperModel(model_size_or_path, device="cuda", compute_type="int8_float16", download_root=cache_dir)
 
         # or run on CPU with INT8
         # tested: works, but slow, appx 10-times than cuda FP16

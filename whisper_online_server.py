@@ -6,6 +6,7 @@ import argparse
 import os
 import logging
 import numpy as np
+import torch
 
 logger = logging.getLogger(__name__)
 parser = argparse.ArgumentParser()
@@ -158,6 +159,7 @@ class ServerProcessor:
             o = online.process_iter()
             try:
                 self.send_result(o)
+                torch.cuda.empty_cache()
             except BrokenPipeError:
                 logger.info("broken pipe -- connection closed?")
                 break
@@ -168,6 +170,12 @@ class ServerProcessor:
 
 
 # server loop
+
+def log_gpu_memory():
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / 1024**2
+        reserved = torch.cuda.memory_reserved() / 1024**2
+        logger.info(f"GPU memory allocated: {allocated:.2f} MB, reserved: {reserved:.2f} MB")
 
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
     s.bind((args.host, args.port))
