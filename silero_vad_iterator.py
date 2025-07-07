@@ -36,10 +36,7 @@ class VADIterator:
             Final speech chunks are padded by speech_pad_ms each side
         """
 
-        if isinstance(model, tuple):
-            self.model = model[0]
-        else:
-            self.model = model
+        self.model = model
         self.threshold = threshold
         self.sampling_rate = sampling_rate
 
